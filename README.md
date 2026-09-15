@@ -535,7 +535,7 @@ listed in [testdata/README.md](testdata/README.md):
 
 ```sh
 export AVDROOT_TEST_ASSETS=~/avdroot-assets
-go test ./...     # 110 tests run, 1 still skipped
+go test ./...     # 112 tests run, 1 still skipped
 ```
 
 The one that still skips is the certificate-export comparison, which needs the

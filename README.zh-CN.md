@@ -487,7 +487,7 @@ internal/ui/            终端输出
 
 ```sh
 export AVDROOT_TEST_ASSETS=~/avdroot-assets
-go test ./...     # 110 个执行，仍有 1 个跳过
+go test ./...     # 112 个执行，仍有 1 个跳过
 ```
 
 仍然跳过的那个是证书导出格式的对比测试，需要代理导出同一张 CA 的三种格式，
