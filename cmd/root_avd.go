@@ -130,6 +130,9 @@ func newRootAVDCmd(a *app) *cobra.Command {
 				if err := installMagiskApp(a); err != nil {
 					ui.Warnf("%v", err)
 				}
+				if err := ensureMagiskEnvironment(a, timeout); err != nil {
+					ui.Warnf("%v", err)
+				}
 			}
 			if err := grantShellSu(a); err != nil {
 				ui.Warnf("%v", err)
@@ -182,6 +185,138 @@ func describeTargetChoice(named bool, t *avd.Target) string {
 	return ui.Dim(i18n.T("root.target_note_only_image"))
 }
 
+// setupDialogTimeout bounds how long the Magisk app is given to put its setup
+// prompt on screen after it is opened. A device that is already set up never
+// shows one, so this bounds a case that normally resolves in seconds.
+const setupDialogTimeout = 45 * time.Second
+
+// ensureMagiskEnvironment makes the Magisk app unpack the files Magisk needs.
+//
+// Patching a ramdisk installs Magisk's init and its daemon, but not the rest of
+// Magisk: those ship inside the manager app and are written to /data/adb/magisk
+// only when the app runs its first-start setup. Until that has happened and the
+// device has restarted, "su" on PATH is the emulator's own su, which reads
+// "-c" as a uid and fails with "invalid uid/gid '-c'". Magisk looks perfectly
+// healthy the whole time — it reports its version and accepts policy writes —
+// which is what makes this worth a step of its own rather than a longer wait.
+func ensureMagiskEnvironment(a *app, timeout time.Duration) error {
+	ui.Step(i18n.T("root.env_setup"))
+
+	// The check below needs root, and gaining it here rather than in
+	// grantShellSu saves a restart of adbd. It is handed back on the way out:
+	// a root adbd would make every later su check pass on adbd's authority
+	// instead of Magisk's, which is a verification of nothing.
+	defer dropAdbdRoot(a)
+
+	installed, err := a.adbCli.MagiskEnvInstalled()
+	if err != nil {
+		return err
+	}
+	if installed {
+		ui.OK(i18n.T("root.env_ready"))
+		return nil
+	}
+	ui.Info(i18n.T("root.env_missing"))
+
+	// An unanswered permission prompt would be the only thing on screen when
+	// the setup dialog is looked for, so it is settled before the app opens.
+	if err := a.adbCli.AllowNotifications(adb.MagiskPackage); err != nil {
+		return err
+	}
+	if err := a.adbCli.LaunchApp(adb.MagiskPackage); err != nil {
+		return err
+	}
+	ui.Detail(i18n.T("root.env_opening"))
+
+	// The boot id must be read before the dialog is answered, because answering
+	// it is what triggers the restart.
+	before, err := a.adbCli.BootID()
+	if err != nil {
+		return err
+	}
+
+	label, err := answerSetupDialog(a.adbCli, setupDialogTimeout)
+	if err != nil {
+		return err
+	}
+	if label == "" {
+		ui.Warn(i18n.T("root.env_no_dialog"))
+		ui.Info(i18n.T("root.env_no_dialog_hint"))
+		return nil
+	}
+	ui.OK(i18n.T("root.env_answered", label))
+	ui.Info(i18n.T("root.env_rebooting"))
+
+	if err := waitForNewBoot(a.adbCli, before, timeout); err != nil {
+		return err
+	}
+	ui.OK(i18n.T("root.env_rebooted"))
+	return nil
+}
+
+// answerSetupDialog waits for the Magisk app to ask about setting itself up and
+// presses the button that accepts. It returns the label it pressed, or an empty
+// string when no prompt ever appeared.
+//
+// Only a dialog the Magisk app owns is answered, so a system prompt cannot be
+// dismissed by mistake, and the button is chosen by position rather than by
+// label because Magisk ships ninety translations.
+func answerSetupDialog(cli *adb.Client, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if pkg, err := cli.ForegroundPackage(); err == nil && pkg == adb.MagiskPackage {
+			if nodes, err := cli.UIDump(); err == nil {
+				if btn, ok := adb.FindAffirmativeButton(nodes, adb.MagiskPackage); ok {
+					label := adb.ButtonLabel(nodes, btn)
+					x, y := btn.Bounds.Center()
+					if err := cli.Tap(x, y); err != nil {
+						return "", err
+					}
+					return label, nil
+				}
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return "", nil
+}
+
+// waitForNewBoot blocks until the device has restarted and finished booting.
+// Waiting for a boot is not the same thing: the device is up already, so it is
+// the boot id that tells a fresh boot apart from the current one.
+func waitForNewBoot(cli *adb.Client, previous string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		id, err := cli.BootID()
+		if err != nil {
+			continue // the device is down, which is what a restart looks like
+		}
+		if id != previous {
+			return emulator.WaitForBoot(cli, time.Until(deadline))
+		}
+	}
+	return fmt.Errorf("the emulator did not restart within %s", timeout)
+}
+
+// dropAdbdRoot returns adbd to the normal shell if it is running as root.
+//
+// Root held by adbd is what makes an su check meaningless: every command
+// succeeds regardless of what Magisk does. Anywhere root is taken for a
+// purpose, it is given back when that purpose is served.
+func dropAdbdRoot(a *app) {
+	if !a.adbCli.IsShellRoot() {
+		return
+	}
+	if _, err := a.adbCli.Run("unroot"); err != nil {
+		return
+	}
+	// adbd restarts, so the device needs a moment before it answers again.
+	time.Sleep(2 * time.Second)
+	_, _ = a.adbCli.Run("wait-for-device")
+	_, _ = a.adbCli.WaitReady(30 * time.Second)
+}
+
 // grantShellSu allows the adb shell to run su without a tap in the Magisk app.
 //
 // Magisk asks for a decision the first time a uid requests root, and that
@@ -212,14 +347,11 @@ func grantShellSu(a *app) error {
 	// adbd is root now. Drop back to the normal shell so the check that
 	// follows exercises Magisk's su rather than the emulator's own root shell.
 	// This changes the state the user's own tooling sees, so it is announced.
-	if _, err := a.adbCli.Run("unroot"); err == nil {
-		time.Sleep(2 * time.Second)
-		_, _ = a.adbCli.Run("wait-for-device")
-		if a.adbCli.IsShellRoot() {
-			ui.Detail(i18n.T("root.adbd_still_root"))
-		} else {
-			ui.Detail(i18n.T("root.adbd_unrooted"))
-		}
+	dropAdbdRoot(a)
+	if a.adbCli.IsShellRoot() {
+		ui.Detail(i18n.T("root.adbd_still_root"))
+	} else {
+		ui.Detail(i18n.T("root.adbd_unrooted"))
 	}
 	return nil
 }
@@ -253,8 +385,18 @@ func reportRoot(a *app, t *avd.Target) error {
 		}
 	}
 
+	// Root held by adbd would make the check below pass whatever Magisk does,
+	// so it is given up first: the question is whether Magisk grants root, not
+	// whether the emulator does.
 	if a.adbCli.IsShellRoot() {
-		ui.OK(i18n.T("root.shell_root"))
+		ui.Info(i18n.T("root.dropping_adbd_root"))
+		dropAdbdRoot(a)
+	}
+	if a.adbCli.IsShellRoot() {
+		// Nothing can be concluded here, because every command already runs as
+		// root. Say so rather than reporting a success that was not tested.
+		ui.Warn(i18n.T("root.shell_root"))
+		ui.Info(i18n.T("root.shell_root_hint"))
 		return nil
 	}
 

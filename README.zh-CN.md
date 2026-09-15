@@ -29,6 +29,14 @@ $ avdroot root
     preinit device: vdd1 (read from the running emulator)
 ==> Restarting the emulator
     booting cold, because a snapshot would restore the pre-patch ramdisk
+==> Installing the Magisk app
+  ok installed com.topjohnwu.magisk (Magisk 31.0)
+==> Preparing Magisk's environment
+    the app has not unpacked Magisk yet, so the su on PATH is the emulator's own
+    opening the Magisk app so it can finish installing itself
+  ok the app asked to set itself up; pressed "OK"
+    the app restarts the device to finish; waiting for it to come back
+  ok the device restarted with Magisk's environment in place
 ==> Granting su to the adb shell
   ok uid 2000 allowed
 ==> Verifying root
@@ -322,6 +330,14 @@ Magisk 的 `find_preinit_device`，读取运行中设备的 `/proc/self/mountinf
 `/data` 在 device-mapper 上、`/metadata` 在 virtio 盘上的 AVD 会得到 `vdd1`。模拟器
 没运行时请传 `--preinit`。
 
+**打过补丁的 ramdisk 不等于装好了 Magisk。** 它只装上了 Magisk 的 init 和守护进程，
+而 Magisk 的其余文件在管理器 App 里，只有当 App 首次运行「额外设置」时才会写入
+`/data/adb/magisk`。在那之前（以及 App 重启设备之前），`PATH` 里的 `su` 是模拟器自带
+的那一个 —— 它把 `-c` 当成 uid 解析，报 `su: invalid uid/gid '-c'`。而且全程看不出
+异常：Magisk 照样报版本号、照样接受 su 策略写入，症状是工具宣称 Magisk 一切正常、
+却根本用不了它。`avdroot root` 会打开 App、应答设置提示、并等 App 自己发起的那次重启，
+这才让第一次运行就成功，而不是要跑第二遍。
+
 **`su` 通常需要手点授权。** Magisk 在某个 uid 第一次请求 root 时会询问 App，而脚本
 没法回答这个问题。`avdroot root` 改用 `magisk --sqlite` 直接写入策略行，取值来自
 Magisk 自己的 `SuPolicy` 枚举（`Allow = 2`，`until = 0` 表示永不过期）。守护进程每次
@@ -438,7 +454,7 @@ internal/imgfmt/        gzip、lz4、lz4_legacy、xz、lzma、bzip2
 internal/magisk/        安装包解包与 boot_patch.sh 的等价实现
 internal/avd/           SDK、AVD、系统镜像的识别
 internal/ramdisk/       读写、原子写入、备份与还原
-internal/adb/           adb 封装、su 策略、preinit 分区探测
+internal/adb/           adb 封装、su 策略、preinit 分区探测、App 对话框处理
 internal/emulator/      模拟器启动、重启与等待开机
 internal/axml/          二进制 AndroidManifest.xml 解析
 internal/certutil/      证书解析与 SPKI 指纹
@@ -452,14 +468,17 @@ internal/ui/            终端输出
 ### 测试
 
 需要真实数据的测试在资源缺失时会自动跳过，所以在没装 Android SDK 的机器上
-`go test ./...` 也能通过——99 个执行、10 个跳过。要完整跑起来，把
+`go test ./...` 也能通过——105 个执行、12 个跳过。要完整跑起来，把
 `AVDROOT_TEST_ASSETS` 指向含所需文件的目录（清单见
 [testdata/README.md](testdata/README.md)）：
 
 ```sh
 export AVDROOT_TEST_ASSETS=~/avdroot-assets
-go test ./...     # 109 个测试，无跳过
+go test ./...     # 116 个执行，仍有 1 个跳过
 ```
+
+仍然跳过的那个是证书导出格式的对比测试，需要代理导出同一张 CA 的三种格式，
+清单同样见 [testdata/README.md](testdata/README.md)。
 
 这些资源让测试套件变成针对真实数据的 cpio、压缩和 Magisk 层完整回归，其中包含与
 Magisk 官方打补丁结果的对照。它们永远不入库。

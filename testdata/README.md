@@ -16,6 +16,9 @@ needs them.
 | `ramdisk.stock.img` | A pristine `ramdisk.img` taken straight from a system image: `$ANDROID_HOME/system-images/<api>/<tag>/<abi>/ramdisk.img` | `internal/cpio`, `internal/magisk` |
 | `ramdisk.patched.img` | The same image after patching it with this tool. Used to check restore and re-patch behaviour. | `internal/cpio` |
 | `ramdisk.reference.img` | A ramdisk patched by **Magisk's own installer**, used to assert that this implementation produces the same entry set, permissions and `.rmlist`. Optional, but it is the strongest check in the suite. | `internal/magisk` |
+| `reqable-ca.crt` | The root CA of a local interception proxy, in any format `Parse` accepts. The test pins the SPKI that the `openssl` command in Chromium's documentation produces for **this** certificate, so it has to be the same CA the pinned value came from. | `internal/certutil` |
+| `export.pem`, `export.crt`, `export.0` | That same CA exported three ways from the proxy's export menu. Exporting the same CA as PEM, DER and Android's `.0` must yield one identical key. | `internal/certutil` |
+| `export-nopass.p12`, `export-pass.p12` | The same CA as PKCS#12, with and without a password. Optional; when present they must be recognised as PKCS#12 rather than reported as garbage. | `internal/certutil` |
 
 Example:
 
@@ -24,4 +27,7 @@ export AVDROOT_TEST_ASSETS=~/avdroot-assets
 go test ./...
 ```
 
-The assets are ignored by `.gitignore`; only this file is tracked.
+The assets are ignored by `.gitignore`; only this file and captured
+`uiautomator` dumps under a package's `testdata/` are tracked. A dump is a few
+kilobytes of text and is worth committing because it is what the device actually
+emitted, rather than a hand-written guess at it.

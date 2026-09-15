@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,15 +19,31 @@ import (
 // produces, otherwise Chrome silently ignores the flag. This value was produced
 // by that command for the Reqable CA on this machine, and is pinned so the Go
 // implementation cannot drift from it.
-const (
-	realCA     = "/tmp/cacmp/app.crt"
-	realCASPki = "nHhlCoiiwRRZzTU+d2MDZrdTs7bvRBrIWpFSTTyqWDU="
-)
+const realCASPki = "nHhlCoiiwRRZzTU+d2MDZrdTs7bvRBrIWpFSTTyqWDU="
+
+// certAsset resolves a certificate fixture from $AVDROOT_TEST_ASSETS, or from a
+// testdata directory beside this package. The search order matches the rest of
+// the suite, and the fixtures it wants are described in testdata/README.md.
+func certAsset(t *testing.T, name string) ([]byte, bool) {
+	t.Helper()
+	var candidates []string
+	if dir := os.Getenv("AVDROOT_TEST_ASSETS"); dir != "" {
+		candidates = append(candidates, filepath.Join(dir, name))
+	}
+	candidates = append(candidates, filepath.Join("testdata", name))
+	for _, path := range candidates {
+		if data, err := os.ReadFile(path); err == nil {
+			return data, true
+		}
+	}
+	return nil, false
+}
 
 func TestSPKIMatchesOpenSSL(t *testing.T) {
-	data, err := os.ReadFile(realCA)
-	if err != nil {
-		t.Skipf("reference certificate unavailable: %v", err)
+	data, ok := certAsset(t, "reqable-ca.crt")
+	if !ok {
+		t.Skip("skipping: reqable-ca.crt not found. Set AVDROOT_TEST_ASSETS to a directory " +
+			"holding the certificate fixtures; see testdata/README.md")
 	}
 	cert, err := Parse(data)
 	if err != nil {
@@ -129,14 +146,14 @@ func TestIsCARejectsLeaf(t *testing.T) {
 // clear explanation. PEM, DER and Android's ".0" are all accepted; PKCS#12 is a
 // container and is reported as such.
 func TestExportFormats(t *testing.T) {
-	dir := "/tmp/fmt"
-	if _, err := os.Stat(dir + "/export.pem"); err != nil {
-		t.Skip("no fixtures; run the export comparison to create them")
-	}
+	// The same CA exported three ways. All three must parse, and all three must
+	// yield the same key, which is what makes the export menu a choice of
+	// packaging rather than of content.
 	for _, name := range []string{"export.pem", "export.crt", "export.0"} {
-		data, err := os.ReadFile(dir + "/" + name)
-		if err != nil {
-			t.Fatal(err)
+		data, ok := certAsset(t, name)
+		if !ok {
+			t.Skipf("skipping: %s not found. Set AVDROOT_TEST_ASSETS to a directory holding "+
+				"the certificate fixtures; see testdata/README.md", name)
 		}
 		cert, err := Parse(data)
 		if err != nil {
@@ -148,16 +165,18 @@ func TestExportFormats(t *testing.T) {
 		}
 	}
 
-	// A .p12 must be recognised and explained, not reported as garbage.
+	// A .p12 must be recognised and explained, not reported as garbage. These
+	// two are optional: with and without a password, since the detection has to
+	// work before anything is decrypted.
 	for _, name := range []string{"export-nopass.p12", "export-pass.p12"} {
-		data, err := os.ReadFile(dir + "/" + name)
-		if err != nil {
+		data, ok := certAsset(t, name)
+		if !ok {
 			continue
 		}
 		if !IsPKCS12(data) {
 			t.Errorf("%s was not recognised as PKCS#12", name)
 		}
-		_, err = Parse(data)
+		_, err := Parse(data)
 		if err == nil {
 			t.Errorf("%s parsed, which is unexpected", name)
 		}
