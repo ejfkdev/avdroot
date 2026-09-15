@@ -15,14 +15,11 @@ go.work
 go.work.sum
 
 # Test assets are provided by the developer, never committed; see
-# testdata/README.md. Only the accompanying README files are tracked, plus
-# small text fixtures such as captured uiautomator dumps, which are worth
-# committing because they are the real thing rather than a hand-written guess.
+# testdata/README.md. Only the accompanying README files are tracked.
 /testdata/*
 !/testdata/README.md
 **/testdata/*
 !**/testdata/README.md
-!**/testdata/*.xml
 .internal/
 Magisk.zip
 Magisk.apk

@@ -27,18 +27,15 @@ emulator.
 $ avdroot root
 ==> Target
     Pixel_10_Pro_XL  (the only AVD)
+==> Preparing Magisk's environment
+    Magisk's files are not unpacked yet; writing them for 31.0 now
+  ok 14 files written for Magisk 31.0, before the restart that will use them
 ==> Patching
     preinit device: vdd1 (read from the running emulator)
 ==> Restarting the emulator
     booting cold, because a snapshot would restore the pre-patch ramdisk
 ==> Installing the Magisk app
   ok installed com.topjohnwu.magisk (Magisk 31.0)
-==> Preparing Magisk's environment
-    the app has not unpacked Magisk yet, so the su on PATH is the emulator's own
-    opening the Magisk app so it can finish installing itself
-  ok the app asked to set itself up; pressed "OK"
-    the app restarts the device to finish; waiting for it to come back
-  ok the device restarted with Magisk's environment in place
 ==> Granting su to the adb shell
   ok uid 2000 allowed
 ==> Verifying root
@@ -200,7 +197,7 @@ These apply to every command:
 | `-y`, `--yes` | `root`, `patch` | Skip the confirmation prompt |
 | `--dry-run` | `patch` | Show the plan and write nothing |
 | `--force` | `root`, `patch` | Re-patch an already patched ramdisk |
-| `--no-install` | `root` | Skip installing the Magisk app |
+| `--no-install` | `root` | Skip installing the Magisk app; rooting does not depend on it |
 | `--no-restart` | `root`, `trust-chrome` | Leave the emulator or browser alone |
 | `--timeout 10m` | `root` | How long to wait for boot |
 | `--keep-verity`, `--keep-forceencrypt` | `patch` | Both default to on; disable to strip the fstab options |
@@ -357,15 +354,21 @@ device-mapper and whose `/metadata` is on a virtio disk. Pass `--preinit` when
 the emulator is not running.
 
 **A patched ramdisk is not a finished Magisk.** It installs Magisk's init and
-its daemon, and nothing else: the rest of Magisk ships inside the manager app
-and is written to `/data/adb/magisk` only when the app runs its first-start
-setup. Until that has happened *and* the device has restarted, the `su` on
-`PATH` is the emulator's own, which reads `-c` as a uid and fails with
-`su: invalid uid/gid '-c'`. Nothing looks wrong — Magisk reports its version and
-accepts su-policy writes the whole time — so the symptom is a tool that declares
-Magisk healthy and then cannot use it. `avdroot root` opens the app, answers the
-setup prompt, and waits for the restart the app performs, which is what makes
-the first run succeed rather than the second.
+its daemon, and nothing else. The rest of Magisk ships inside the manager app
+and belongs in `/data/adb/magisk`, and `magiskd` decides at startup whether that
+directory is complete: until it is, `su` is simply not put on `PATH`, and the
+`su` that is there is the emulator's own, which reads `-c` as a uid and fails
+with `su: invalid uid/gid '-c'`. Nothing looks wrong in the meantime — Magisk
+reports its version and accepts su-policy writes the whole time — so the symptom
+is a tool that declares Magisk healthy and then cannot use it.
+
+Magisk's own check is the `env_check` shell function in
+[`scripts/app_functions.sh`](https://github.com/topjohnwu/Magisk/blob/master/scripts/app_functions.sh),
+and its fix, `fix_env`, is a copy into that directory. Neither is a `magisk`
+subcommand, and neither touches the boot image. `avdroot` reproduces both, which
+is why the app, its setup dialog and a second reboot are all unnecessary: the
+files go in before the restart that was happening anyway, so the first boot with
+a patched ramdisk already has them.
 
 **`su` normally needs a tap.** Magisk asks the app for a decision the first time
 a uid requests root, and a script cannot answer that. `avdroot root` writes the
@@ -497,7 +500,7 @@ internal/imgfmt/        gzip, lz4, lz4_legacy, xz, lzma and bzip2
 internal/magisk/        installer extraction and the boot_patch.sh equivalent
 internal/avd/           SDK, AVD and system-image discovery
 internal/ramdisk/       load/save, atomic writes, backup and restore
-internal/adb/           adb wrapper, su policy, preinit detection, app dialogs
+internal/adb/           adb wrapper, su policy, preinit detection, Magisk's environment
 internal/emulator/      emulator start, restart and boot waiting
 internal/axml/          binary AndroidManifest.xml reader
 internal/certutil/      certificate parsing and SPKI fingerprints
@@ -512,13 +515,13 @@ ramdisk patched by Magisk itself.
 ### Tests
 
 The tests that need real data skip themselves when it is absent, so
-`go test ./...` passes on a machine with no Android SDK — 105 tests run, 12 skip.
+`go test ./...` passes on a machine with no Android SDK — 99 tests run, 14 skip.
 To run everything, point `AVDROOT_TEST_ASSETS` at a directory holding the assets
 listed in [testdata/README.md](testdata/README.md):
 
 ```sh
 export AVDROOT_TEST_ASSETS=~/avdroot-assets
-go test ./...     # 116 tests run, 1 still skipped
+go test ./...     # 110 tests run, 1 still skipped
 ```
 
 The one that still skips is the certificate-export comparison, which needs the

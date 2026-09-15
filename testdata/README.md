@@ -27,7 +27,6 @@ export AVDROOT_TEST_ASSETS=~/avdroot-assets
 go test ./...
 ```
 
-The assets are ignored by `.gitignore`; only this file and captured
-`uiautomator` dumps under a package's `testdata/` are tracked. A dump is a few
-kilobytes of text and is worth committing because it is what the device actually
-emitted, rather than a hand-written guess at it.
+The assets are ignored by `.gitignore`; only this file is tracked. Everything
+else the suite needs is either constructed in the test or generated on the spot,
+so a checkout with none of the above still builds and tests cleanly.

@@ -14,6 +14,7 @@ import (
 	"github.com/ejfkdev/avdroot/internal/avd"
 	"github.com/ejfkdev/avdroot/internal/emulator"
 	"github.com/ejfkdev/avdroot/internal/i18n"
+	"github.com/ejfkdev/avdroot/internal/magisk"
 	"github.com/ejfkdev/avdroot/internal/ui"
 )
 
@@ -75,6 +76,14 @@ func newRootAVDCmd(a *app) *cobra.Command {
 				return fmt.Errorf("cancelled")
 			}
 
+			// Magisk's files belong in place before the restart below, because
+			// magiskd decides at startup whether su is available and cannot be
+			// asked to reconsider afterwards. Staging them now is what makes
+			// that one restart enough.
+			if err := stageMagiskEnvironment(a, t); err != nil {
+				return err
+			}
+
 			if err := runPatch(a, t, patchFlags{
 				force:          force,
 				keepVerity:     true,
@@ -130,9 +139,6 @@ func newRootAVDCmd(a *app) *cobra.Command {
 				if err := installMagiskApp(a); err != nil {
 					ui.Warnf("%v", err)
 				}
-				if err := ensureMagiskEnvironment(a, timeout); err != nil {
-					ui.Warnf("%v", err)
-				}
 			}
 			if err := grantShellSu(a); err != nil {
 				ui.Warnf("%v", err)
@@ -185,118 +191,82 @@ func describeTargetChoice(named bool, t *avd.Target) string {
 	return ui.Dim(i18n.T("root.target_note_only_image"))
 }
 
-// setupDialogTimeout bounds how long the Magisk app is given to put its setup
-// prompt on screen after it is opened. A device that is already set up never
-// shows one, so this bounds a case that normally resolves in seconds.
-const setupDialogTimeout = 45 * time.Second
-
-// ensureMagiskEnvironment makes the Magisk app unpack the files Magisk needs.
+// stageMagiskEnvironment puts Magisk's files in place before the emulator is
+// restarted with the patched ramdisk.
 //
-// Patching a ramdisk installs Magisk's init and its daemon, but not the rest of
-// Magisk: those ship inside the manager app and are written to /data/adb/magisk
-// only when the app runs its first-start setup. Until that has happened and the
-// device has restarted, "su" on PATH is the emulator's own su, which reads
-// "-c" as a uid and fails with "invalid uid/gid '-c'". Magisk looks perfectly
-// healthy the whole time — it reports its version and accepts policy writes —
-// which is what makes this worth a step of its own rather than a longer wait.
-func ensureMagiskEnvironment(a *app, timeout time.Duration) error {
+// A patched ramdisk carries Magisk's init and its daemon and nothing else. The
+// rest of Magisk lives in the manager app and belongs in /data/adb/magisk, and
+// magiskd inspects that directory while starting: until it is complete, su is
+// not put on PATH, and the su that *is* there is the emulator's own, which reads
+// "-c" as a uid and fails with "invalid uid/gid '-c'". Nothing looks wrong in
+// the meantime, because Magisk still reports its version and still accepts
+// su-policy writes.
+//
+// magiskd decides this once, at startup, so the files have to be in place before
+// the restart this command was going to perform anyway. Doing it here rather
+// than afterwards is the difference between one restart and two, and it is why
+// neither the manager app nor a tap on its setup dialog is needed.
+func stageMagiskEnvironment(a *app, t *avd.Target) error {
 	ui.Step(i18n.T("root.env_setup"))
 
-	// The check below needs root, and gaining it here rather than in
-	// grantShellSu saves a restart of adbd. It is handed back on the way out:
-	// a root adbd would make every later su check pass on adbd's authority
-	// instead of Magisk's, which is a verification of nothing.
-	defer dropAdbdRoot(a)
-
-	installed, err := a.adbCli.MagiskEnvInstalled()
+	abi := t.ABI
+	if abi == "" {
+		abi = a.abi
+	}
+	p, err := a.payload(abi)
 	if err != nil {
 		return err
 	}
-	if installed {
-		ui.OK(i18n.T("root.env_ready"))
+
+	state, err := a.adbCli.MagiskEnvCheck(p.Version, p.VersionCode)
+	switch {
+	case err != nil:
+		// The emulator may be too old to answer, or adb too unsettled. That is
+		// not a reason to refuse to patch; the final check will report.
+		ui.Warn(i18n.T("root.env_unknown", err))
+		return nil
+	case state == adb.EnvOK:
+		ui.OK(i18n.T("root.env_ready", p.Version))
 		return nil
 	}
-	ui.Info(i18n.T("root.env_missing"))
+	switch state {
+	case adb.EnvVersionMismatch:
+		ui.Info(i18n.T("root.env_other_version", p.Version))
+	default:
+		ui.Info(i18n.T("root.env_missing", p.Version))
+	}
 
-	// An unanswered permission prompt would be the only thing on screen when
-	// the setup dialog is looked for, so it is settled before the app opens.
-	if err := a.adbCli.AllowNotifications(adb.MagiskPackage); err != nil {
+	installer, err := a.ensureMagiskZIP()
+	if err != nil {
 		return err
 	}
-	if err := a.adbCli.LaunchApp(adb.MagiskPackage); err != nil {
-		return err
-	}
-	ui.Detail(i18n.T("root.env_opening"))
-
-	// The boot id must be read before the dialog is answered, because answering
-	// it is what triggers the restart.
-	before, err := a.adbCli.BootID()
+	files, err := magisk.EnvironmentFiles(installer, abi)
 	if err != nil {
 		return err
 	}
 
-	label, err := answerSetupDialog(a.adbCli, setupDialogTimeout)
+	// The files are laid out on the host first, so the device either receives a
+	// complete set or keeps whatever it already had.
+	dir, err := os.MkdirTemp("", "avdroot-env-")
 	if err != nil {
 		return err
 	}
-	if label == "" {
-		ui.Warn(i18n.T("root.env_no_dialog"))
-		ui.Info(i18n.T("root.env_no_dialog_hint"))
-		return nil
+	defer os.RemoveAll(dir)
+	for _, f := range files {
+		path := filepath.Join(dir, filepath.FromSlash(f.Name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, f.Data, 0o755); err != nil {
+			return err
+		}
 	}
-	ui.OK(i18n.T("root.env_answered", label))
-	ui.Info(i18n.T("root.env_rebooting"))
 
-	if err := waitForNewBoot(a.adbCli, before, timeout); err != nil {
+	if err := a.adbCli.InstallMagiskEnv(dir); err != nil {
 		return err
 	}
-	ui.OK(i18n.T("root.env_rebooted"))
+	ui.OK(i18n.T("root.env_installed", len(files), p.Version))
 	return nil
-}
-
-// answerSetupDialog waits for the Magisk app to ask about setting itself up and
-// presses the button that accepts. It returns the label it pressed, or an empty
-// string when no prompt ever appeared.
-//
-// Only a dialog the Magisk app owns is answered, so a system prompt cannot be
-// dismissed by mistake, and the button is chosen by position rather than by
-// label because Magisk ships ninety translations.
-func answerSetupDialog(cli *adb.Client, timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if pkg, err := cli.ForegroundPackage(); err == nil && pkg == adb.MagiskPackage {
-			if nodes, err := cli.UIDump(); err == nil {
-				if btn, ok := adb.FindAffirmativeButton(nodes, adb.MagiskPackage); ok {
-					label := adb.ButtonLabel(nodes, btn)
-					x, y := btn.Bounds.Center()
-					if err := cli.Tap(x, y); err != nil {
-						return "", err
-					}
-					return label, nil
-				}
-			}
-		}
-		time.Sleep(2 * time.Second)
-	}
-	return "", nil
-}
-
-// waitForNewBoot blocks until the device has restarted and finished booting.
-// Waiting for a boot is not the same thing: the device is up already, so it is
-// the boot id that tells a fresh boot apart from the current one.
-func waitForNewBoot(cli *adb.Client, previous string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(2 * time.Second)
-		id, err := cli.BootID()
-		if err != nil {
-			continue // the device is down, which is what a restart looks like
-		}
-		if id != previous {
-			return emulator.WaitForBoot(cli, time.Until(deadline))
-		}
-	}
-	return fmt.Errorf("the emulator did not restart within %s", timeout)
 }
 
 // dropAdbdRoot returns adbd to the normal shell if it is running as root.

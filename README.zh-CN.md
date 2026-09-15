@@ -25,18 +25,15 @@
 $ avdroot root
 ==> Target
     Pixel_10_Pro_XL  (the only AVD)
+==> Preparing Magisk's environment
+    Magisk's files are not unpacked yet; writing them for 31.0 now
+  ok 14 files written for Magisk 31.0, before the restart that will use them
 ==> Patching
     preinit device: vdd1 (read from the running emulator)
 ==> Restarting the emulator
     booting cold, because a snapshot would restore the pre-patch ramdisk
 ==> Installing the Magisk app
   ok installed com.topjohnwu.magisk (Magisk 31.0)
-==> Preparing Magisk's environment
-    the app has not unpacked Magisk yet, so the su on PATH is the emulator's own
-    opening the Magisk app so it can finish installing itself
-  ok the app asked to set itself up; pressed "OK"
-    the app restarts the device to finish; waiting for it to come back
-  ok the device restarted with Magisk's environment in place
 ==> Granting su to the adb shell
   ok uid 2000 allowed
 ==> Verifying root
@@ -194,7 +191,7 @@ avdroot restore                # 从 ramdisk.img.backup 还原
 | `-y`、`--yes` | `root`、`patch` | 跳过确认 |
 | `--dry-run` | `patch` | 只打印计划，不写入 |
 | `--force` | `root`、`patch` | 对已打过补丁的 ramdisk 也重新打 |
-| `--no-install` | `root` | 不装 Magisk App |
+| `--no-install` | `root` | 不装 Magisk App；能不能 root 与它无关 |
 | `--no-restart` | `root`、`trust-chrome` | 不动模拟器或浏览器 |
 | `--timeout 10m` | `root` | 等待启动的超时时间 |
 | `--keep-verity`、`--keep-forceencrypt` | `patch` | 默认都开启；关掉会去掉 fstab 里的对应选项 |
@@ -331,12 +328,18 @@ Magisk 的 `find_preinit_device`，读取运行中设备的 `/proc/self/mountinf
 没运行时请传 `--preinit`。
 
 **打过补丁的 ramdisk 不等于装好了 Magisk。** 它只装上了 Magisk 的 init 和守护进程，
-而 Magisk 的其余文件在管理器 App 里，只有当 App 首次运行「额外设置」时才会写入
-`/data/adb/magisk`。在那之前（以及 App 重启设备之前），`PATH` 里的 `su` 是模拟器自带
-的那一个 —— 它把 `-c` 当成 uid 解析，报 `su: invalid uid/gid '-c'`。而且全程看不出
+而 Magisk 的其余文件在管理器 App 里、应当位于 `/data/adb/magisk`。`magiskd` 在**启动时**
+判断这个目录是否完整：不完整时它根本不会把 `su` 放到 `PATH` 上，而 `PATH` 里那个 `su`
+是模拟器自带的 —— 它把 `-c` 当成 uid 解析，报 `su: invalid uid/gid '-c'`。而且全程看不出
 异常：Magisk 照样报版本号、照样接受 su 策略写入，症状是工具宣称 Magisk 一切正常、
-却根本用不了它。`avdroot root` 会打开 App、应答设置提示、并等 App 自己发起的那次重启，
-这才让第一次运行就成功，而不是要跑第二遍。
+却根本用不了它。
+
+Magisk 自己的检查是
+[`scripts/app_functions.sh`](https://github.com/topjohnwu/Magisk/blob/master/scripts/app_functions.sh)
+里的 `env_check` shell 函数，而它的修复函数 `fix_env` 就是往那个目录拷文件。两者都不是
+`magisk` 的子命令，也都不碰 boot 镜像。`avdroot` 复刻了这两者，因此 App、它的设置对话框
+以及第二次重启全都不需要：文件赶在**本来就要做的那次重启之前**写好，于是第一次用打过补丁的
+ramdisk 启动时它们就已经在位了。
 
 **`su` 通常需要手点授权。** Magisk 在某个 uid 第一次请求 root 时会询问 App，而脚本
 没法回答这个问题。`avdroot root` 改用 `magisk --sqlite` 直接写入策略行，取值来自
@@ -454,7 +457,7 @@ internal/imgfmt/        gzip、lz4、lz4_legacy、xz、lzma、bzip2
 internal/magisk/        安装包解包与 boot_patch.sh 的等价实现
 internal/avd/           SDK、AVD、系统镜像的识别
 internal/ramdisk/       读写、原子写入、备份与还原
-internal/adb/           adb 封装、su 策略、preinit 分区探测、App 对话框处理
+internal/adb/           adb 封装、su 策略、preinit 分区探测、Magisk 运行环境
 internal/emulator/      模拟器启动、重启与等待开机
 internal/axml/          二进制 AndroidManifest.xml 解析
 internal/certutil/      证书解析与 SPKI 指纹
@@ -468,13 +471,13 @@ internal/ui/            终端输出
 ### 测试
 
 需要真实数据的测试在资源缺失时会自动跳过，所以在没装 Android SDK 的机器上
-`go test ./...` 也能通过——105 个执行、12 个跳过。要完整跑起来，把
+`go test ./...` 也能通过——99 个执行、14 个跳过。要完整跑起来，把
 `AVDROOT_TEST_ASSETS` 指向含所需文件的目录（清单见
 [testdata/README.md](testdata/README.md)）：
 
 ```sh
 export AVDROOT_TEST_ASSETS=~/avdroot-assets
-go test ./...     # 116 个执行，仍有 1 个跳过
+go test ./...     # 110 个执行，仍有 1 个跳过
 ```
 
 仍然跳过的那个是证书导出格式的对比测试，需要代理导出同一张 CA 的三种格式，
