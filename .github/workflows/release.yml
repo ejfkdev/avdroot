@@ -170,14 +170,32 @@ jobs:
           else
             tag="${GITHUB_REF_NAME}"
           fi
+
+          # The tag's annotation is the release description. "gh release create
+          # --generate-notes" builds notes from merged pull requests, and this
+          # repository commits straight to main, so the first two releases were
+          # published with nothing but a changelog link. Actions/checkout does
+          # fetch the tag itself, so the annotation is available here.
+          #
+          # The signature block is dropped, because git reports it as part of
+          # the message for a signed tag. "gh release edit" has no
+          # --notes-from-tag, so both paths read the file instead.
+          notes=RELEASE_NOTES.md
+          git tag -l --format='%(contents)' "$tag" \
+            | sed '/^-----BEGIN .*SIGNATURE-----$/,/^-----END .*SIGNATURE-----$/d' > "$notes"
+          if [ ! -s "$notes" ]; then
+            echo "::warning::tag $tag carries no description; writing it is what fills this release in"
+          fi
+
           # Pre-release tags such as v31.0-rc1 are marked as such, matching how
           # upstream Magisk labels its own channel.
-          flags=(--title "avdroot $tag" --generate-notes)
+          flags=(--title "avdroot $tag" --notes-file "$notes")
           case "$tag" in
             *-rc*|*-beta*|*-alpha*) flags+=(--prerelease) ;;
           esac
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" artifacts/* --clobber
+            gh release edit "$tag" "${flags[@]}"
           else
             gh release create "$tag" artifacts/* "${flags[@]}"
           fi
