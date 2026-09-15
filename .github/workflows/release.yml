@@ -64,6 +64,32 @@ jobs:
             -o "dist/$name" .
           echo "NAME=$name" >> "$GITHUB_ENV"
 
+      # Runs before UPX, because UPX compresses the very strings being checked.
+      # This is the step that can inspect every target: the runner is Linux, so
+      # it cannot execute six of the seven binaries it just produced.
+      - name: Verify build output
+        run: |
+          set -e
+          case "${{ matrix.goos }}" in
+            linux)   want=ELF ;;
+            darwin)  want=Mach-O ;;
+            windows) want=PE32 ;;
+          esac
+          got=$(file -b "dist/$NAME")
+          case "$got" in
+            "$want"*) echo "format: $got" ;;
+            *) echo "::error::$NAME is not a $want binary: $got"; exit 1 ;;
+          esac
+
+          # The version is injected at link time. A cross-build that silently
+          # lost its ldflags would still look fine everywhere else.
+          version="${{ steps.version.outputs.value }}"
+          if ! grep -qaF "$version" "dist/$NAME"; then
+            echo "::error::$NAME does not embed the version string $version"
+            exit 1
+          fi
+          echo "version string $version is embedded"
+
       # UPX cannot pack Mach-O, so it is only attempted where it works. A
       # failure here is not fatal: the uncompressed binary is still correct.
       - name: Compress with UPX
@@ -89,14 +115,15 @@ jobs:
       - name: Smoke test
         run: |
           set -e
-          # A binary that cannot print its own help is not worth releasing, and
-          # this catches a broken cross-build before it is published.
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            echo "skipping execution of a Windows binary on Linux"
-          else
+          # Only linux/amd64 can run on this runner. Executing anything else
+          # fails with "Exec format error", which says nothing about the build,
+          # so those targets are verified above instead.
+          if [ "${{ matrix.goos }}" = "linux" ] && [ "${{ matrix.goarch }}" = "amd64" ]; then
             chmod +x "dist/$NAME"
             "./dist/$NAME" --help > /dev/null
             "./dist/$NAME" --version
+          else
+            echo "${{ matrix.goos }}/${{ matrix.goarch }} cannot run here; format and version were checked above"
           fi
 
       - name: Package

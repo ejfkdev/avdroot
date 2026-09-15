@@ -96,11 +96,15 @@ sha256sum -c SHA256SUMS.txt --ignore-missing
 ```
 
 
-**With Go** (1.21 or newer):
+**With Go** (1.24 or newer):
 
 ```sh
 go install github.com/ejfkdev/avdroot@latest
 ```
+
+Go 1.24 is the floor because earlier toolchains emit no `LC_UUID` load command,
+and macOS 26's `dyld` refuses to launch such a binary. Go 1.21 and 1.22 stamp
+`minos 26.0` as well, so they fail on both counts.
 
 **From source:**
 

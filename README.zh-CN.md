@@ -91,11 +91,15 @@ sha256sum -c SHA256SUMS.txt --ignore-missing
 ```
 
 
-**用 Go 安装**（需要 1.21 或更新）：
+**用 Go 安装**（需要 1.24 或更新）：
 
 ```sh
 go install github.com/ejfkdev/avdroot@latest
 ```
+
+版本下限是 1.24，因为更早的工具链不会生成 `LC_UUID` 加载命令，而 macOS 26 的
+`dyld` 会直接拒绝启动这样的二进制。Go 1.21 和 1.22 还会把 `minos` 标记为
+26.0，因此两条都不满足。
 
 **从源码构建：**
 

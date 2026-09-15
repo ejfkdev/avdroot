@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/ejfkdev/avdroot/internal/cpio"
@@ -68,7 +69,14 @@ func TestSaveWritesAndPreservesMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fi.Mode().Perm() != 0o600 {
-		t.Errorf("mode = %v, want 0600", fi.Mode().Perm())
+		// Windows has no Unix permission bits: the file is either writable or
+		// read-only, and Stat reports 0666 either way. There is nothing to
+		// assert, so only the platforms that can represent the mode check it.
+		if runtime.GOOS == "windows" {
+			t.Logf("skipping mode check on Windows: mode = %v", fi.Mode().Perm())
+		} else {
+			t.Errorf("mode = %v, want 0600", fi.Mode().Perm())
+		}
 	}
 	// The rewritten image must still be readable and detect as the same format.
 	if _, got, err := Load(path); err != nil || got != format {
