@@ -33,9 +33,9 @@ jobs:
           - { goos: windows, goarch: amd64, upx: true  }
           - { goos: windows, goarch: arm64, upx: true  }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -137,7 +137,7 @@ jobs:
             cp "dist/$NAME" "artifacts/${out}"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: avdroot-${{ matrix.goos }}-${{ matrix.goarch }}
           path: artifacts/*
@@ -147,9 +147,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
