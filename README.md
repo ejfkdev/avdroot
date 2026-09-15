@@ -231,6 +231,20 @@ byte-wise sorted order. `internal/magisk/parity_test.go` asserts that the entry
 set, permissions, `.rmlist` contents and config this tool produces for a real
 AVD match a ramdisk patched by Magisk's own installer.
 
+`avdroot root` wraps that in the order the device actually needs, which is not
+the order these steps are usually written down in:
+
+1. **Start the emulator**, because the preinit device is read from its live
+   mount table.
+2. **Write Magisk's environment** into `/data/adb/magisk` — the files the
+   manager app would otherwise unpack. This has to come *before* the restart:
+   `magiskd` decides once, at startup, whether `su` is available, so files that
+   arrive afterwards are only noticed by the following boot.
+3. **Patch** the ramdisk, as above.
+4. **Restart cold**, so the patched ramdisk is the one that gets loaded.
+5. **Grant the adb shell's su policy**, and check that `su` really returns
+   `uid=0`.
+
 ## Choose a Magisk release
 
 Magisk ships **one universal package**, not one per Android version. A release
