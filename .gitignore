@@ -1,0 +1,57 @@
+# Build output
+/avdroot
+/avdroot.exe
+/dist/
+/bin/
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace files, which are local to a checkout
+go.work
+go.work.sum
+
+# Test assets are provided by the developer, never committed; see
+# testdata/README.md. Only the accompanying README files are tracked.
+/testdata/*
+!/testdata/README.md
+**/testdata/*
+!**/testdata/README.md
+.internal/
+Magisk.zip
+Magisk.apk
+
+# Ramdisk backups produced by "avdroot patch". They live beside a system image
+# rather than in the repository, but a checkout that is also an SDK root should
+# not pick them up.
+ramdisk*.img.backup
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Linux
+.directory
+*~

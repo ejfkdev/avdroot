@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and release
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  # UPX roughly halves the Windows and Linux binaries. It cannot compress
+  # mach-O, which is why macOS artefacts are published as built.
+  UPX_VERSION: "4.2.4"
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: darwin,  goarch: arm64, upx: false }
+          - { goos: darwin,  goarch: amd64, upx: false }
+          - { goos: linux,   goarch: amd64, upx: true  }
+          - { goos: linux,   goarch: arm64, upx: true  }
+          - { goos: linux,   goarch: arm,   upx: true  }
+          - { goos: windows, goarch: amd64, upx: true  }
+          - { goos: windows, goarch: arm64, upx: true  }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The tag is the version, so the binary reports exactly what was built.
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -e
+          name=avdroot
+          [ "$GOOS" = "windows" ] && name=avdroot.exe
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.value }}" \
+            -o "dist/$name" .
+          echo "NAME=$name" >> "$GITHUB_ENV"
+
+      # UPX cannot pack Mach-O, so it is only attempted where it works. A
+      # failure here is not fatal: the uncompressed binary is still correct.
+      - name: Compress with UPX
+        if: matrix.upx
+        run: |
+          set -e
+          url="https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          if ! curl -sSfL --retry 3 --max-time 120 -o upx.tar.xz "$url"; then
+            echo "::warning::could not download UPX; shipping the binary uncompressed"
+            exit 0
+          fi
+          tar -xJf upx.tar.xz
+          mv "upx-${UPX_VERSION}-amd64_linux/upx" ./upx
+          chmod +x ./upx
+          before=$(stat -c%s "dist/$NAME")
+          ./upx --best --lzma "dist/$NAME" || {
+            echo "::warning::UPX could not pack $NAME; shipping it uncompressed"
+            exit 0
+          }
+          after=$(stat -c%s "dist/$NAME")
+          echo "UPX: $before -> $after bytes"
+
+      - name: Smoke test
+        run: |
+          set -e
+          # A binary that cannot print its own help is not worth releasing, and
+          # this catches a broken cross-build before it is published.
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "skipping execution of a Windows binary on Linux"
+          else
+            chmod +x "dist/$NAME"
+            "./dist/$NAME" --help > /dev/null
+            "./dist/$NAME" --version
+          fi
+
+      - name: Package
+        run: |
+          set -e
+          mkdir -p artifacts
+          out="avdroot_${{ matrix.goos }}_${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp "dist/$NAME" "artifacts/${out}.exe"
+          else
+            cp "dist/$NAME" "artifacts/${out}"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: avdroot-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          # Pre-release tags such as v31.0-rc1 are marked as such, matching how
+          # upstream Magisk labels its own channel.
+          flags=(--title "avdroot $tag" --generate-notes)
+          case "$tag" in
+            *-rc*|*-beta*|*-alpha*) flags+=(--prerelease) ;;
+          esac
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" artifacts/* --clobber
+          else
+            gh release create "$tag" artifacts/* "${flags[@]}"
+          fi
